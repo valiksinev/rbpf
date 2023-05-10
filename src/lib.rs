@@ -99,6 +99,7 @@ struct MetaBuff {
 /// ```
 pub struct EbpfVmMbuff<'a> {
     prog:     Option<&'a [u8]>,
+    data:     Option<&'a [u8]>,
     verifier: Verifier,
     jit:      Option<JitProgram>,
     helpers:  HashMap<u32, ebpf::Helper>,
@@ -121,16 +122,18 @@ impl<'a> EbpfVmMbuff<'a> {
     /// // Instantiate a VM.
     /// let mut vm = rbpf::EbpfVmMbuff::new(Some(prog)).unwrap();
     /// ```
-    pub fn new(prog: Option<&'a [u8]>) -> Result<EbpfVmMbuff<'a>, Error> {
+    pub fn new(prog: Option<&'a [u8]>, data_section: Option<&'a [u8]>) -> Result<EbpfVmMbuff<'a>, Error> {
         if let Some(prog) = prog {
             verifier::check(prog)?;
         }
 
         Ok(EbpfVmMbuff {
             prog:     prog,
+            data:     data_section,
             verifier: verifier::check,
             jit:      None,
             helpers:  HashMap::new(),
+
         })
     }
 
@@ -382,10 +385,25 @@ impl<'a> EbpfVmMbuff<'a> {
                     *x as u64
                 },
                 ebpf::LD_W_REG   => reg[_dst] = unsafe {
-                    #[allow(cast_ptr_alignment)]
-                    let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u32;
-                    check_mem_load(x as u64, 4, insn_ptr)?;
-                    *x as u64
+                    if reg[_src] == 0  && self.data.is_some() {
+                        let data = self.data.unwrap();
+                        if insn.off >= 0  && (insn.off as usize) + 4 <= data.len() {
+                            let x = (data.as_ptr() as u64 + insn.off as u64) as * const u32;
+                            *x as u64
+                        } else {
+                            return Err(
+                                Error::new(ErrorKind::Other, format!(
+                                    "error to read from section .data  (insn #{:?}), offset {:?}, data.len {:?}",
+                                    insn_ptr, insn.off, data.len()
+                                ))
+                            )
+                        }
+                    } else {
+                        #[allow(cast_ptr_alignment)]
+                        let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u32;
+                        check_mem_load(x as u64, 4, insn_ptr)?;
+                        *x as u64
+                    }
                 },
                 ebpf::LD_DW_REG  => reg[_dst] = unsafe {
                     #[allow(cast_ptr_alignment)]
@@ -809,10 +827,11 @@ impl<'a> EbpfVmFixedMbuff<'a> {
     /// // Instantiate a VM. Note that we provide the start and end offsets for mem pointers.
     /// let mut vm = rbpf::EbpfVmFixedMbuff::new(Some(prog), 0x40, 0x50).unwrap();
     /// ```
-    pub fn new(prog: Option<&'a [u8]>, data_offset: usize, data_end_offset: usize) -> Result<EbpfVmFixedMbuff<'a>, Error> {
-        let parent = EbpfVmMbuff::new(prog)?;
+    pub fn new(prog: Option<&'a [u8]>, data_offset: usize, data_end_offset: usize, data_section: Option<&'a [u8]>) -> Result<EbpfVmFixedMbuff<'a>, Error> {
+        let parent = EbpfVmMbuff::new(prog, data_section)?;
         let get_buff_len = | x: usize, y: usize | if x >= y { x + 8 } else { y + 8 };
         let buffer = vec![0u8; get_buff_len(data_offset, data_end_offset)];
+
         let mbuff = MetaBuff {
             data_offset:     data_offset,
             data_end_offset: data_end_offset,
@@ -1137,8 +1156,8 @@ impl<'a> EbpfVmRaw<'a> {
     /// // Instantiate a VM.
     /// let vm = rbpf::EbpfVmRaw::new(Some(prog)).unwrap();
     /// ```
-    pub fn new(prog: Option<&'a [u8]>) -> Result<EbpfVmRaw<'a>, Error> {
-        let parent = EbpfVmMbuff::new(prog)?;
+    pub fn new(prog: Option<&'a [u8]>, data_section: Option<&'a [u8]>) -> Result<EbpfVmRaw<'a>, Error> {
+        let parent = EbpfVmMbuff::new(prog, data_section)?;
          Ok(EbpfVmRaw {
             parent: parent,
         })
@@ -1406,8 +1425,8 @@ impl<'a> EbpfVmNoData<'a> {
     /// // Instantiate a VM.
     /// let vm = rbpf::EbpfVmNoData::new(Some(prog));
     /// ```
-    pub fn new(prog: Option<&'a [u8]>) -> Result<EbpfVmNoData<'a>, Error> {
-        let parent = EbpfVmRaw::new(prog)?;
+    pub fn new(prog: Option<&'a [u8]>, data_section: Option<&'a [u8]>) -> Result<EbpfVmNoData<'a>, Error> {
+        let parent = EbpfVmRaw::new(prog, data_section)?;
         Ok(EbpfVmNoData {
             parent: parent,
         })
