@@ -286,6 +286,7 @@ impl<'a> EbpfVmMbuff<'a> {
             None => Err(Error::new(ErrorKind::Other,
                         "Error: No program set, call prog_set() to load one"))?,
         };
+        let data = self.data.unwrap_or_default();
         let stack = vec![0u8;ebpf::STACK_SIZE];
 
         // R1 points to beginning of memory area, R10 to stack
@@ -300,10 +301,10 @@ impl<'a> EbpfVmMbuff<'a> {
         }
 
         let check_mem_load = | addr: u64, len: usize, insn_ptr: usize | {
-            EbpfVmMbuff::check_mem(addr, len, "load", insn_ptr, mbuff, mem, &stack)
+            EbpfVmMbuff::check_mem(addr, len, "load", insn_ptr, mbuff, mem, &stack, &data)
         };
         let check_mem_store = | addr: u64, len: usize, insn_ptr: usize | {
-            EbpfVmMbuff::check_mem(addr, len, "store", insn_ptr, mbuff, mem, &stack)
+            EbpfVmMbuff::check_mem(addr, len, "store", insn_ptr, mbuff, mem, &stack, &data)
         };
 
         // Loop on instructions
@@ -369,6 +370,10 @@ impl<'a> EbpfVmMbuff<'a> {
                     let next_insn = ebpf::get_insn(prog, insn_ptr);
                     insn_ptr += 1;
                     reg[_dst] = ((insn.imm as u32) as u64) + ((next_insn.imm as u64) << 32);
+
+                    if reg[_dst] == 0  && !data.is_empty() {
+                        reg[_dst] = data.as_ptr() as u64;
+                    }
                 },
 
                 // BPF_LDX class
@@ -385,25 +390,10 @@ impl<'a> EbpfVmMbuff<'a> {
                     *x as u64
                 },
                 ebpf::LD_W_REG   => reg[_dst] = unsafe {
-                    if reg[_src] == 0  && self.data.is_some() {
-                        let data = self.data.unwrap();
-                        if insn.off >= 0  && (insn.off as usize) + 4 <= data.len() {
-                            let x = (data.as_ptr() as u64 + insn.off as u64) as * const u32;
-                            *x as u64
-                        } else {
-                            return Err(
-                                Error::new(ErrorKind::Other, format!(
-                                    "error to read from section .data  (insn #{:?}), offset {:?}, data.len {:?}",
-                                    insn_ptr, insn.off, data.len()
-                                ))
-                            )
-                        }
-                    } else {
-                        #[allow(cast_ptr_alignment)]
-                        let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u32;
-                        check_mem_load(x as u64, 4, insn_ptr)?;
-                        *x as u64
-                    }
+                    #[allow(cast_ptr_alignment)]
+                    let x = (reg[_src] as *const u8).offset(insn.off as isize) as *const u32;
+                    check_mem_load(x as u64, 4, insn_ptr)?;
+                    *x as u64
                 },
                 ebpf::LD_DW_REG  => reg[_dst] = unsafe {
                     #[allow(cast_ptr_alignment)]
@@ -613,7 +603,7 @@ impl<'a> EbpfVmMbuff<'a> {
     }
 
     fn check_mem(addr: u64, len: usize, access_type: &str, insn_ptr: usize,
-                 mbuff: &[u8], mem: &[u8], stack: &[u8]) -> Result<(), Error> {
+                 mbuff: &[u8], mem: &[u8], stack: &[u8], data: &[u8]) -> Result<(), Error> {
         if mbuff.as_ptr() as u64 <= addr && addr + len as u64 <= mbuff.as_ptr() as u64 + mbuff.len() as u64 {
             return Ok(())
         }
@@ -621,6 +611,9 @@ impl<'a> EbpfVmMbuff<'a> {
             return Ok(())
         }
         if stack.as_ptr() as u64 <= addr && addr + len as u64 <= stack.as_ptr() as u64 + stack.len() as u64 {
+            return Ok(())
+        }
+        if data.as_ptr() as u64 <= addr && addr + len as u64 <= data.as_ptr() as u64 + data.len() as u64 {
             return Ok(())
         }
 
